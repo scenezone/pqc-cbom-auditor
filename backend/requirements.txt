@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+pymongo
+python-multipart
+reportlab
+jsonschema
+cryptography>=44.0
+httpx
+pytest

@@ -1,0 +1,26 @@
+version: "3.9"
+services:
+  mongodb:
+    image: mongo:7
+    ports: ["27017:27017"]
+    volumes: [mongo-data:/data/db]
+  backend:
+    build: ./backend
+    environment:
+      MONGODB_URI: mongodb://mongodb:27017
+      MONGODB_DATABASE: pqc_cbom_auditor
+      CORS_ORIGINS: http://localhost:5173
+      SCAN_TEMP_DIRECTORY: /app/tmp/scans
+      REPORT_STORAGE_DIRECTORY: /app/tmp/reports
+    depends_on: [mongodb]
+    ports: ["8000:8000"]
+    volumes: [scan-data:/app/tmp]
+  frontend:
+    build: ./frontend
+    ports: ["5173:5173"]
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000/api
+    depends_on: [backend]
+volumes:
+  mongo-data:
+  scan-data:

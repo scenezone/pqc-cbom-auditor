@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CycloneDX Bill of Materials Standard v1.7",
+  "type": "object",
+  "required": [
+    "bomFormat",
+    "specVersion"
+  ],
+  "properties": {
+    "bomFormat": {
+      "type": "string",
+      "enum": [
+        "CycloneDX"
+      ]
+    },
+    "specVersion": {
+      "type": "string",
+      "enum": [
+        "1.7"
+      ]
+    },
+    "serialNumber": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "type",
+          "name"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "application",
+              "framework",
+              "library",
+              "container",
+              "platform",
+              "device",
+              "device-driver",
+              "firmware",
+              "file",
+              "machine-learning-model",
+              "data",
+              "cryptographic-asset"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "bom-ref": {
+            "type": "string"
+          },
+          "cryptoProperties": {
+            "type": "object"
+          },
+          "evidence": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "vulnerabilities": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": true
+}
