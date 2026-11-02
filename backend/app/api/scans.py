@@ -12,6 +12,14 @@ from app.tls.probe import normalize_tls_target_url
 
 router = APIRouter(prefix="/api/scans", tags=["Scanning"])
 
+def _public_endpoint_context(scan):
+    result = dict(scan)
+    if result.get("repository_source_type") == "https_endpoint" or result.get("tls_target_url"):
+        context = dict(result.get("business_context") or {})
+        context["external_exposure"] = "Public"
+        result["business_context"] = context
+    return result
+
 async def _create_repository_scan(
     source_type,
     scan_name,
@@ -84,6 +92,11 @@ async def _create_repository_scan(
         "scan_depth": 10,
         "include_tests": False,
     }
+    effective_business_context = dict(business_context or {})
+    if tls_target:
+        # The endpoint probe rejects non-public IPs, so its assessed exposure
+        # must not inherit the repository form's default of Internal.
+        effective_business_context["external_exposure"] = "Public"
     scan = database.create_scan({
         "scan_id": scan_id, "repository_name": scan_name,
         "repository_source_type": repository_source_type,
@@ -91,7 +104,7 @@ async def _create_repository_scan(
         "intake_skipped_files": intake["skipped_large_files"],
         "languages": configuration.get("languages", SUPPORTED_LANGUAGES),
         "scan_configuration": configuration,
-        "business_context": business_context})
+        "business_context": effective_business_context})
     job_manager.enqueue(scan_id, lambda: scan_service.execute_scan(scan_id, workspace))
     return {"scan_id": scan_id, "status": scan["scan_status"]}
 
@@ -164,7 +177,7 @@ async def scan_https_endpoint(request: TLSEndpointScanRequest):
         "tls_target_url": tls_target,
         "languages": [],
         "scan_configuration": {"languages": [], "scan_depth": 0, "include_tests": False},
-        "business_context": request.business_context.model_dump(),
+        "business_context": {**request.business_context.model_dump(), "external_exposure": "Public"},
     })
     job_manager.enqueue(scan_id, lambda: scan_service.execute_scan(scan_id, None))
     return {"scan_id": scan_id, "status": scan["scan_status"]}
@@ -174,12 +187,12 @@ async def scan_status(scan_id: str):
     scan = database.get_scan(scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    return scan
+    return _public_endpoint_context(scan)
 
 @router.get("")
 @router.get("/")
 async def list_scans(limit: int = 100, skip: int = 0):
-    return database.list_scans(limit=limit, skip=skip)
+    return [_public_endpoint_context(scan) for scan in database.list_scans(limit=limit, skip=skip)]
 
 @router.delete("/{scan_id}")
 async def delete_scan(scan_id: str):
@@ -194,7 +207,8 @@ async def scan_summary(scan_id: str):
     scan = database.get_scan(scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    findings = database.get_findings(scan_id)
+    findings = scan_service.current_findings(scan_id, scan=scan)
+    scan = _public_endpoint_context(scan)
     classifications = {"Quantum Vulnerable":0,"Quantum Resistant Under Current Knowledge":0,"Unknown / Needs Review":0}
     severity = {"Critical":0,"High":0,"Medium":0,"Low":0}
     algorithms, languages = {}, {}
@@ -205,6 +219,9 @@ async def scan_summary(scan_id: str):
         severity[sc] = severity.get(sc, 0) + 1
         algorithms[f.get("algorithm", "Unknown")] = algorithms.get(f.get("algorithm", "Unknown"), 0) + 1
         languages[f.get("language", "unknown")] = languages.get(f.get("language", "unknown"), 0) + 1
+    priority_findings = [f for f in findings if not (
+        f.get("detection_rule_id") == "TLS-HYBRID-GROUP"
+        and f.get("quantum_classification") == "Quantum Resistant Under Current Knowledge")]
     return {"scan": scan,
         "counts": {"files_scanned": scan.get("scanned_files",0), "files_skipped": scan.get("skipped_files",0),
                    "findings": len(findings), "unique_assets": len({f["algorithm"] for f in findings if "algorithm" in f}),
@@ -214,4 +231,4 @@ async def scan_summary(scan_id: str):
                    "high_priority": severity.get("Critical", 0) + severity.get("High", 0)},
         "classification_distribution": classifications, "severity_distribution": severity,
         "algorithm_distribution": algorithms, "language_distribution": languages,
-        "top_findings": sorted(findings, key=lambda f: f.get("severity_score", 0), reverse=True)[:10]}
+        "top_findings": sorted(priority_findings, key=lambda f: f.get("severity_score", 0), reverse=True)[:10]}

@@ -321,7 +321,7 @@ def _build_findings(protocols, groups, certificates):
     if tls12["status"] == "confirmed":
         findings.append({"title": "TLS 1.2 provides no PQC key exchange", "severity": "High",
                          "quantum_status": "not_pqc",
-                         "detail": "TLS 1.2 was negotiated successfully. The standardized ML-KEM hybrid groups tested here are TLS 1.3 groups and cannot protect TLS 1.2 sessions."})
+                         "detail": "TLS 1.2 was negotiated successfully without a post-quantum hybrid key exchange. Captured sessions using classical key exchange may be exposed to harvest-now-decrypt-later attacks; the tested ML-KEM hybrid groups apply to TLS 1.3."})
     hybrid = [group for group in groups if group["pqc_algorithm"]]
     confirmed_hybrid = [group for group in hybrid if group["status"] == "confirmed"]
     uncertain_hybrid = [group for group in hybrid if group["status"] == "inconclusive"]
@@ -355,10 +355,10 @@ def _build_findings(protocols, groups, certificates):
             key_name = certificate["public_key_algorithm"]
             if certificate.get("public_key_bits"):
                 key_name += f"-{certificate['public_key_bits']}"
-            findings.append({"title": f"{certificate.get('protocol', 'TLS')} certificate has a quantum-vulnerable public key or signature",
-                             "severity": "High", "quantum_status": "quantum_vulnerable",
+            findings.append({"title": "Endpoint certificate uses a quantum-vulnerable public key or signature",
+                             "severity": "Medium", "quantum_status": "quantum_vulnerable",
                              "protocol": certificate.get("protocol"), "certificate": certificate,
-                             "detail": f"Certificate public key: {key_name} ({key_status}); certificate signature: {certificate['signature_algorithm']} ({sig_status}). The endpoint presented this classical certificate; no PQ certificate was observed for this protocol."})
+                             "detail": f"Certificate public key: {key_name} ({key_status}); certificate signature: {certificate['signature_algorithm']} ({sig_status}). This is a future live-authentication forgery risk if a sufficiently capable quantum computer exists; it does not decrypt previously captured sessions. The endpoint presented this classical certificate; no post-quantum certificate was observed."})
     return findings
 
 def probe_tls_endpoint(target_url):
@@ -425,4 +425,4 @@ def probe_tls_endpoint(target_url):
             "probe_client": {"name": "OpenSSL s_client", "version": _openssl_version(),
                              "timeout_seconds": get_settings().tls_probe_timeout_seconds,
                              "inter_probe_delay_seconds": get_settings().tls_probe_inter_probe_delay_seconds,
-                             "hybrid_groups": "requires a build with RFC 10024 groups"}}
+                             "hybrid_groups": "TLS 1.3 PQ/T groups defined in RFC 10024"}}

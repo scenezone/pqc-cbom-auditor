@@ -15,6 +15,31 @@ MIGRATIONS = {
 
 class MigrationAdvisor:
     def recommend(self, finding):
+        if finding.get("evidence_type") == "tls_probe":
+            rule = finding.get("detection_rule_id")
+            if rule == "TLS12-NO-PQC":
+                return (
+                    "Check whether supported clients still require TLS 1.2. If not, disable it; "
+                    "if older clients require it, document TLS 1.2 as residual harvest-now-decrypt-later risk, "
+                    "keep the strongest compatible TLS 1.2 configuration, and plan to retire those clients."
+                )
+            if rule == "TLS-CERTIFICATE-ALGORITHM":
+                return (
+                    "For a publicly trusted website, replacing this with an ML-DSA X.509 certificate is not actionable yet "
+                    "because CA and browser support is not broadly available. Keep using a certificate profile supported "
+                    "by your CA and browsers, monitor their post-quantum roadmaps, "
+                    "and assess private-PKI deployments separately against their managed-client support."
+                )
+            if rule == "TLS-HYBRID-GROUP":
+                return (
+                    "Keep the confirmed TLS 1.3 hybrid groups enabled and monitor real client negotiation; "
+                    "a forced-group probe confirms endpoint capability, not that every client session selects a hybrid group."
+                )
+            if rule == "TLS13-GROUP-CAPABILITY":
+                return (
+                    "The hybrid-group probe was inconclusive. Review the recorded OpenSSL diagnostics and repeat from a "
+                    "supported client before treating the endpoint as either supporting or rejecting hybrid key exchange."
+                )
         family = finding.get("algorithm_family","Other")
         operation = finding.get("crypto_operation","default")
         rules = MIGRATIONS.get(family, MIGRATIONS["Other"])

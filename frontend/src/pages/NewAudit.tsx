@@ -56,6 +56,7 @@ export default function NewAudit() {
     : Boolean(config.tls_target_url?.trim())
   const selectMode = (mode: 'repository' | 'https') => {
     setSourceMode(mode)
+    if (mode === 'https') setConfig(current => ({ ...current, external_exposure: 'Public' }))
     setErrorMessage(null)
   }
 
@@ -107,18 +108,18 @@ export default function NewAudit() {
                 </div> : <RepositoryUpload selectedFile={file} onFileSelected={setFile} />}
               </div> : <div className="space-y-3">
                 <label htmlFor="tls-target" className="block text-xs font-medium text-slate-300">HTTPS endpoint</label>
-                <input id="tls-target" type="url" value={config.tls_target_url || ''} onChange={event => setConfig({ ...config, tls_target_url: event.target.value })} placeholder="https://service.example.com" className="field-control" />
+                <input id="tls-target" type="url" value={config.tls_target_url || ''} onChange={event => setConfig({ ...config, tls_target_url: event.target.value, ...(event.target.value.trim() ? { external_exposure: 'Public' } : {}) })} placeholder="https://service.example.com" className="field-control" />
                 <p className="text-xs leading-5 text-slate-500">The scanner probes TLS 1.2/1.3, key exchange groups, cipher suites, and the presented certificate. No source code is needed.</p>
               </div>}
             </div>
           </section>
 
-          <ScanConfiguration config={config} onChange={setConfig} />
+          <ScanConfiguration config={config} onChange={setConfig} publicEndpoint={sourceMode === 'https' || Boolean(config.tls_target_url?.trim())} />
           {sourceMode !== 'https' && <section className="card">
             <p className="text-sm font-semibold text-slate-100">Optional live TLS assessment</p>
             <p className="mt-1 text-xs leading-5 text-slate-500">Probe an HTTPS endpoint you are authorized to assess. The scan tests TLS 1.2/1.3, supported groups, negotiated cipher suites, and the presented certificate.</p>
             <label htmlFor="tls-target" className="mt-4 block text-xs font-medium text-slate-300">HTTPS endpoint</label>
-            <input id="tls-target" type="url" value={config.tls_target_url || ''} onChange={event => setConfig({ ...config, tls_target_url: event.target.value })} placeholder="https://service.example.com" className="field-control mt-1.5" />
+            <input id="tls-target" type="url" value={config.tls_target_url || ''} onChange={event => setConfig({ ...config, tls_target_url: event.target.value, ...(event.target.value.trim() ? { external_exposure: 'Public' } : {}) })} placeholder="https://service.example.com" className="field-control mt-1.5" />
           </section>}
         </div>
 

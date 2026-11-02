@@ -16,6 +16,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from app.classification.tls_findings import refresh_tls_findings
 from app.classification.migration import MigrationAdvisor
 from app.reporting.executive_summary import ExecutiveSummaryBuilder
 
@@ -40,7 +41,7 @@ class ExecutivePDFGenerator:
 
     def generate(self, scan, findings):
         scan = scan or {}
-        findings = list(findings or [])
+        findings = refresh_tls_findings(scan, findings)
         buf = io.BytesIO()
         doc = SimpleDocTemplate(
             buf,
@@ -63,7 +64,7 @@ class ExecutivePDFGenerator:
         tls = scan.get("tls_assessment") or {}
         if tls:
             story.append(PageBreak())
-            story.extend(self._tls_section(tls))
+            story.extend(self._tls_section(tls, findings))
 
         story.append(PageBreak())
         story.extend(self._findings_section(findings))
@@ -99,11 +100,10 @@ class ExecutivePDFGenerator:
             "body": ParagraphStyle(
                 "ReportBody", parent=base["BodyText"], fontName="Helvetica",
                 fontSize=9, leading=13, textColor=INK, spaceAfter=5,
-                wordWrap="CJK",
             ),
             "small": ParagraphStyle(
                 "ReportSmall", parent=base["BodyText"], fontSize=7.5,
-                leading=10, textColor=INK, wordWrap="CJK",
+                leading=10, textColor=INK,
             ),
             "muted": ParagraphStyle(
                 "ReportMuted", parent=base["BodyText"], fontSize=8,
@@ -161,6 +161,8 @@ class ExecutivePDFGenerator:
 
         now = datetime.now(timezone.utc).strftime("%d %B %Y")
         context = scan.get("business_context") or {}
+        if scan.get("repository_source_type") == "https_endpoint" or scan.get("tls_target_url"):
+            context = {**context, "external_exposure": "Public"}
         title = [Spacer(1, 2.1 * cm), self._rich("PQC Exposure &amp;<br/>Cryptographic Bill of Materials", "cover_title")]
         title.append(self._p("Post-quantum readiness assessment", "cover_subtitle"))
         title.append(Spacer(1, 0.9 * cm))
@@ -169,6 +171,19 @@ class ExecutivePDFGenerator:
         title.append(self._p("ASSESSMENT SUBJECT", "label"))
         title.append(self._p(subject, "h1"))
         title.append(self._p(assessment_type, "cover_subtitle"))
+        title.extend([Spacer(1, 0.15 * cm), self._p("In plain language", "h2")])
+        summary_box = Table([[self._p(self._plain_language_summary(scan, findings), "body")]],
+                            colWidths=[17.4 * cm], hAlign="LEFT")
+        summary_box.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), PALE),
+            ("BOX", (0, 0), (-1, -1), 0.6, LINE),
+            ("LINEBEFORE", (0, 0), (0, -1), 2, TEAL),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        title.append(summary_box)
         title.append(Spacer(1, 0.7 * cm))
         details = [
             [self._p("REPORT DATE", "label"), self._p("SCAN STATUS", "label")],
@@ -219,6 +234,8 @@ class ExecutivePDFGenerator:
                     self._p(self._methodology_text(scan), "small")])
 
         context = scan.get("business_context") or {}
+        if scan.get("repository_source_type") == "https_endpoint" or scan.get("tls_target_url"):
+            context = {**context, "external_exposure": "Public"}
         scan_rows = [
             ("Assessment status", scan.get("scan_status", "Not provided")),
             ("Source type", scan.get("repository_source_type", "Not provided")),
@@ -232,7 +249,16 @@ class ExecutivePDFGenerator:
         out.extend([Spacer(1, 0.25 * cm), self._p("Finding distribution", "h2"),
                     self._distribution_table(counts, severities)])
 
-        prioritized = sorted(findings, key=self._finding_sort_key, reverse=True)[:5]
+        positive = [f for f in findings if self._is_positive_finding(f)]
+        if positive:
+            out.append(self._p("Positive security results", "h2"))
+            for finding in positive:
+                algorithm = html.escape(self._value(finding.get("algorithm"), "Post-quantum hybrid key exchange"))
+                evidence = html.escape(self._value(finding.get("evidence_snippet"), "A TLS 1.3 hybrid-group handshake was confirmed."))
+                out.append(self._rich(f"<b>{algorithm}</b> — {evidence}", "body"))
+
+        risk_findings = [f for f in findings if not self._is_positive_finding(f)]
+        prioritized = sorted(risk_findings, key=self._finding_sort_key, reverse=True)[:5]
         out.append(self._p("Priority actions", "h2"))
         if prioritized:
             for idx, finding in enumerate(prioritized, 1):
@@ -243,16 +269,17 @@ class ExecutivePDFGenerator:
                     f"<b>{idx}. {html.escape(algorithm)}</b> — {html.escape(location)}<br/>"
                     f"{html.escape(rec)}", "body"))
         else:
-            out.append(self._p("No cryptographic findings were reported in the supplied assessment data."))
+            out.append(self._p("No unresolved priority actions were identified in the supplied assessment data."))
         return out
 
-    def _tls_section(self, tls):
+    def _tls_section(self, tls, findings=None):
         out = [self._p("Live TLS endpoint assessment", "h1")]
         out.append(self._key_value_table([
             ("Target", tls.get("target", "Not provided")),
             ("Assessment status", tls.get("status", "Not provided")),
             ("Probe client", (tls.get("probe_client") or {}).get("name", "OpenSSL s_client")),
-            ("Hybrid group capability note", (tls.get("probe_client") or {}).get("hybrid_groups", "Not provided")),
+            ("Probe client version", (tls.get("probe_client") or {}).get("version", "Not recorded")),
+            ("Hybrid groups standard", "RFC 10024 defines X25519MLKEM768, SecP256r1MLKEM768, and SecP384r1MLKEM1024 for TLS 1.3."),
         ]))
         if tls.get("error"):
             out.extend([Spacer(1, 0.2 * cm), self._p(f"Assessment note: {tls['error']}")])
@@ -288,11 +315,25 @@ class ExecutivePDFGenerator:
         tls_findings = tls.get("findings") or []
         if tls_findings:
             out.append(self._p("TLS interpretation", "h2"))
+            finding_by_rule = {f.get("detection_rule_id"): f for f in findings or [] if f.get("evidence_type") == "tls_probe"}
             for item in tls_findings:
                 title = self._value(item.get("title"), "TLS finding")
+                detail = self._value(item.get("detail"))
                 severity = self._value(item.get("severity"), "Not rated")
+                rule = self._tls_rule_for_title(title)
+                scored_finding = finding_by_rule.get(rule)
+                if scored_finding:
+                    severity = (f"{scored_finding.get('severity_category', 'Not rated')} "
+                                f"({scored_finding.get('severity_score', '—')}/100)")
+                if "certificate" in title.lower():
+                    title = "Endpoint certificate uses a quantum-vulnerable public key or signature"
+                    if "future live-authentication" not in detail:
+                        detail += " This is a future live-authentication forgery risk, not a harvest-now-decrypt-later decryption risk."
+                elif "tls 1.2" in title.lower():
+                    if "harvest-now-decrypt-later" not in detail:
+                        detail += " Captured sessions using classical key exchange may face harvest-now-decrypt-later exposure."
                 out.append(self._rich(f"<b>{html.escape(severity)} — {html.escape(title)}</b><br/>"
-                                      f"{html.escape(self._value(item.get('detail')))}", "body"))
+                                      f"{html.escape(detail)}", "body"))
 
         groups = tls.get("groups") or []
         if groups:
@@ -341,13 +382,14 @@ class ExecutivePDFGenerator:
         out.append(self._p(f"This register contains all {len(findings)} finding(s) associated with the assessment. Findings are ordered by severity score, then classification.", "muted"))
 
         ordered = sorted(findings, key=self._finding_sort_key, reverse=True)
-        rows = [[self._p(v, "table_head") for v in ("#", "Severity", "Algorithm / operation", "Location", "Quantum classification", "Confidence")]]
+        rows = [[self._p(v, "table_head") for v in ("#", "Severity", "Algorithm / operation", "Location", "Quantum risk", "Confidence")]]
         for idx, finding in enumerate(ordered, 1):
             rows.append([self._p(str(idx), "small"),
                          self._p(f"{self._value(finding.get('severity_category'), 'Not rated')} ({finding.get('severity_score', '—')})", "small"),
-                         self._p(f"{self._value(finding.get('algorithm'), 'Unknown')}<br/>{self._value(finding.get('crypto_operation'), 'Not provided')}", "small"),
+                         self._rich(f"{html.escape(self._value(finding.get('algorithm'), 'Unknown'))}<br/>"
+                                    f"{html.escape(self._value(finding.get('crypto_operation'), 'Not provided'))}", "small"),
                          self._p(self._location(finding), "small"),
-                         self._p(finding.get("quantum_classification", "Unknown / Needs Review"), "small"),
+                         self._p(self._classification_label(finding.get("quantum_classification")), "small"),
                          self._p(finding.get("detection_confidence", "Not provided"), "small")])
         out.append(self._table(rows, [0.7*cm, 2.4*cm, 3.5*cm, 4.4*cm, 4.1*cm, 2.0*cm]))
         out.append(Spacer(1, 0.35 * cm))
@@ -361,7 +403,8 @@ class ExecutivePDFGenerator:
                 ("Severity", f"{self._value(finding.get('severity_category'), 'Not rated')} ({finding.get('severity_score', '—')})"),
                 ("Quantum classification", finding.get("quantum_classification", "Unknown / Needs Review")),
                 ("Location", self._location(finding)),
-                ("Algorithm variant / key size", f"{finding.get('algorithm_variant', 'Not provided')} / {finding.get('key_size', 'Not provided')}"),
+                ("Algorithm variant / key size", f"{self._value(finding.get('algorithm_variant'), '—')} / {finding.get('key_size') or '—'}"),
+                ("Risk timing", self._risk_timing_label(finding.get("risk_horizon") or (finding.get("score_explanation") or {}).get("risk_horizon"))),
                 ("Purpose", finding.get("cryptographic_purpose", "Not provided")),
                 ("Library / symbol", f"{finding.get('library_name', 'Not provided')} / {finding.get('symbol_name', finding.get('imported_symbol', 'Not provided'))}"),
                 ("Language / evidence type", f"{finding.get('language', 'Not provided')} / {finding.get('evidence_type', 'Not provided')}"),
@@ -422,6 +465,71 @@ class ExecutivePDFGenerator:
             name = finding.get("quantum_classification", "Unknown / Needs Review")
             result[name] = result.get(name, 0) + 1
         return result
+
+    @staticmethod
+    def _tls_rule_for_title(title):
+        normalized = str(title).lower()
+        if "certificate" in normalized:
+            return "TLS-CERTIFICATE-ALGORITHM"
+        if "tls 1.2" in normalized:
+            return "TLS12-NO-PQC"
+        if "hybrid" in normalized and "inconclusive" in normalized:
+            return "TLS13-GROUP-CAPABILITY"
+        if "hybrid" in normalized:
+            return "TLS-HYBRID-GROUP"
+        return None
+
+    def _plain_language_summary(self, scan, findings):
+        tls = scan.get("tls_assessment") or {}
+        groups = tls.get("groups") or []
+        confirmed = [g.get("name") for g in groups if g.get("type") == "hybrid" and g.get("status") == "confirmed"]
+        protocols = {p.get("version"): p for p in tls.get("protocols") or []}
+        tls12_supported = protocols.get("TLS 1.2", {}).get("status") == "confirmed"
+        certificates = tls.get("certificates") or ([tls["certificate"]] if tls.get("certificate") else [])
+        classical_certificate = any(
+            cert and (cert.get("public_key_quantum_status") == "quantum_vulnerable"
+                      or cert.get("signature_quantum_status") == "quantum_vulnerable")
+            for cert in certificates
+        )
+        if confirmed:
+            first = "The site can use post-quantum hybrid key exchange for TLS 1.3 sessions when clients negotiate those groups."
+        elif tls.get("status") == "completed":
+            first = "This scan did not confirm a post-quantum hybrid key exchange; an inconclusive probe does not prove the endpoint lacks support."
+        else:
+            counts = self._classification_counts(findings)
+            first = (f"The assessment found {len(findings)} cryptographic item(s), including "
+                     f"{counts.get('Quantum Vulnerable', 0)} quantum-vulnerable item(s).")
+        if tls12_supported and classical_certificate:
+            second = "Its TLS 1.2 fallback and current certificate still use classical cryptography; check whether older clients need TLS 1.2, and monitor CA and browser support for quantum-resistant website certificates."
+        elif tls12_supported:
+            second = "The endpoint also accepts TLS 1.2 without hybrid protection; check older-client needs before disabling it, or document the remaining traffic-confidentiality risk."
+        elif classical_certificate:
+            second = "The endpoint presents a classical certificate; monitor CA and browser roadmaps for a supported quantum-resistant website-authentication path."
+        else:
+            second = "Review the findings register for evidence, priorities, and the next migration actions."
+        return f"{first} {second}"
+
+    @staticmethod
+    def _is_positive_finding(finding):
+        return (finding.get("detection_rule_id") == "TLS-HYBRID-GROUP"
+                and finding.get("quantum_classification") == "Quantum Resistant Under Current Knowledge")
+
+    @staticmethod
+    def _classification_label(value):
+        return {
+            "Quantum Vulnerable": "Vulnerable",
+            "Quantum Resistant Under Current Knowledge": "Resistant",
+            "Unknown / Needs Review": "Needs review",
+        }.get(value, "Needs review")
+
+    @staticmethod
+    def _risk_timing_label(value):
+        return {
+            "harvest_now_decrypt_later": "Recorded traffic may face future decryption",
+            "future_live_authentication_forgery": "Future live impersonation; not retroactive decryption",
+            "post_quantum_hybrid_key_establishment": "Hybrid quantum-resistant key establishment",
+            "unconfirmed_key_establishment_capability": "Endpoint capability not confirmed",
+        }.get(value, "General quantum-exposure finding")
 
     def _severity_counts(self, findings):
         result = {name: 0 for name in ("Critical", "High", "Medium", "Low", "Informational")}

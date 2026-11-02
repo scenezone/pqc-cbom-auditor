@@ -3,9 +3,10 @@ import type { ScanConfig } from '../types'
 interface Props {
   config: ScanConfig
   onChange: (c: ScanConfig) => void
+  publicEndpoint?: boolean
 }
 
-export default function ScanConfiguration({ config, onChange }: Props) {
+export default function ScanConfiguration({ config, onChange, publicEndpoint = false }: Props) {
   return (
     <div className="card">
       <div className="mb-5 border-b border-white/[0.07] pb-4">
@@ -72,15 +73,21 @@ export default function ScanConfiguration({ config, onChange }: Props) {
 
         <label className="text-xs font-medium text-slate-300">
           <span className="mb-1.5 block">External exposure</span>
-          <select
-            value={config.external_exposure}
-            onChange={e => onChange({ ...config, external_exposure: e.target.value })}
-            className="field-control"
-          >
-            <option value="Public">Public (Internet-facing service)</option>
-            <option value="Partner">Partner (Ecosystem / Partner network)</option>
-            <option value="Internal">Internal (Private isolated network)</option>
-          </select>
+          {publicEndpoint ? (
+            <div className="field-control flex items-center text-slate-300" aria-label="External exposure: public">
+              Public (assessed HTTPS endpoint)
+            </div>
+          ) : (
+            <select
+              value={config.external_exposure}
+              onChange={e => onChange({ ...config, external_exposure: e.target.value })}
+              className="field-control"
+            >
+              <option value="Public">Public (Internet-facing service)</option>
+              <option value="Partner">Partner (Ecosystem / Partner network)</option>
+              <option value="Internal">Internal (Private isolated network)</option>
+            </select>
+          )}
         </label>
       </div>
     </div>

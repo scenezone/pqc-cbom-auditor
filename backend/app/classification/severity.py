@@ -29,12 +29,20 @@ class SeverityEngine:
                     + 0.35*_lookup(SENSITIVITY, context.get("data_sensitivity"), 30)
                     + 0.20*_lookup(EXPOSURE, context.get("external_exposure"), 15))
         key_est = operation in {"key_exchange","key_encapsulation"} or purpose == "key_establishment"
+        tls_certificate_authentication = (
+            finding.get("evidence_type") == "tls_probe"
+            and finding.get("detection_rule_id") == "TLS-CERTIFICATE-ALGORITHM"
+        )
         crypto = 80 if key_est else 50
         if finding.get("detection_confidence") == "Low":
             crypto = min(crypto, 40)
         lifetime = _lookup(RETENTION, context.get("data_retention_horizon"), 30)
         if key_est and classification == "Quantum Vulnerable":
             dlr = lifetime
+        elif tls_certificate_authentication and classification == "Quantum Vulnerable":
+            # A future quantum forgery can undermine live authentication, but
+            # it does not decrypt traffic recorded today (unlike key exchange).
+            dlr = 0
         elif classification == "Quantum Vulnerable":
             dlr = lifetime * 0.4
         else:
@@ -44,7 +52,15 @@ class SeverityEngine:
         cf = CONFIDENCE.get(finding.get("detection_confidence","Medium"), 0.75)
         score = round(min(100, max(0, raw * (0.85 + 0.15*cf))))
         category = next((n for n, lo, hi in SEVERITY_CATEGORIES if lo <= score <= hi), "Low")
+        risk_horizon = (
+            "harvest_now_decrypt_later"
+            if key_est and classification == "Quantum Vulnerable"
+            else "future_live_authentication_forgery"
+            if tls_certificate_authentication and classification == "Quantum Vulnerable"
+            else "general_quantum_exposure"
+        )
         return {"severity_score": score, "severity_category": category,
                 "score_explanation": {"quantum_risk": quantum, "business_impact": round(business,1),
                                       "cryptographic_risk": crypto, "data_lifetime_risk": round(dlr,1),
+                                      "risk_horizon": risk_horizon,
                                       "confidence_factor": cf, "weights": WEIGHTS}}

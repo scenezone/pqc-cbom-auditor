@@ -1,4 +1,4 @@
-import csv, json, logging, uuid
+import csv, io, json, logging, uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from app.cbom.generator import CBOMGenerator
@@ -6,6 +6,7 @@ from app.cbom.validator import CBOMValidator
 from app.classification.classifier import QuantumClassifier
 from app.classification.migration import MigrationAdvisor
 from app.classification.severity import SeverityEngine
+from app.classification.tls_findings import refresh_tls_findings
 from app.config import get_settings
 from app.database.mongodb import database
 from app.reporting.pdf_generator import ExecutivePDFGenerator
@@ -57,7 +58,8 @@ class ScanService:
                 try:
                     tls_assessment = probe_tls_endpoint(scan["tls_target_url"])
                     for tls_finding in tls_assessment.get("findings", []):
-                        normalized = self._normalize_tls_finding(scan_id, tls_assessment, tls_finding)
+                        normalized = self._normalize_tls_finding(
+                            scan_id, tls_assessment, tls_finding, scan.get("business_context") or {})
                         tls_finding["finding_id"] = normalized["finding_id"]
                         enriched.append(normalized)
                 except Exception as tls_exc:
@@ -90,7 +92,7 @@ class ScanService:
             if workspace is not None:
                 cleanup_workspace(workspace)
 
-    def _normalize_tls_finding(self, scan_id, assessment, item):
+    def _normalize_tls_finding(self, scan_id, assessment, item, business_context=None):
         title = item["title"]
         cert = item.get("certificate") or assessment.get("certificate") or {}
         if "certificate" in title.lower():
@@ -100,30 +102,38 @@ class ScanService:
             operation, purpose = "digital_signature", "authenticity"
             rule = "TLS-CERTIFICATE-ALGORITHM"
             variant = cert.get("signature_algorithm", algorithm)
+            risk_horizon = "future_live_authentication_forgery"
         elif "hybrid" in title.lower() and item.get("quantum_status") == "hybrid_or_pqc_confirmed":
             algorithm = next((g.get("pqc_algorithm") for g in assessment.get("groups", [])
                               if g.get("status") == "confirmed" and g.get("pqc_algorithm")), "ML-KEM")
             operation, purpose = "key_exchange", "key_establishment"
             rule, variant = "TLS-HYBRID-GROUP", algorithm
+            risk_horizon = "post_quantum_hybrid_key_establishment"
         elif "hybrid" in title.lower():
             algorithm = "TLS 1.3 hybrid group capability"
             operation, purpose = "key_exchange", "key_establishment"
             rule, variant = "TLS13-GROUP-CAPABILITY", "TLS 1.3"
+            risk_horizon = "unconfirmed_key_establishment_capability"
         elif "TLS 1.2" in title:
             algorithm = "TLS 1.2"
-            operation, purpose = "protocol", "transport_security"
+            operation, purpose = "key_exchange", "key_establishment"
             rule, variant = "TLS12-NO-PQC", "TLS 1.2"
+            risk_horizon = "harvest_now_decrypt_later"
         else:
             algorithm = "TLS 1.3"
             operation, purpose = "key_exchange", "key_establishment"
             rule, variant = "TLS13-GROUP-CAPABILITY", "TLS 1.3"
+            risk_horizon = "unconfirmed_key_establishment_capability"
         finding = {
             "finding_id": str(uuid.uuid4()), "scan_id": scan_id, "language": "tls",
             "file_path": assessment.get("target", "TLS endpoint"), "start_line": 0, "end_line": 0,
             "symbol_name": title, "library_name": "TLS endpoint probe", "imported_symbol": rule,
             "crypto_operation": operation, "algorithm": algorithm, "algorithm_variant": variant,
-            "key_size": cert.get("public_key_bits"), "cryptographic_purpose": purpose,
-            "evidence_type": "tls_probe", "evidence_snippet": item["detail"][:240],
+            # A protocol version or hybrid parameter-set name is not a bit
+            # length. Only a certificate key has a numeric key size here.
+            "key_size": cert.get("public_key_bits") if rule == "TLS-CERTIFICATE-ALGORITHM" else None,
+            "cryptographic_purpose": purpose, "risk_horizon": risk_horizon,
+            "evidence_type": "tls_probe", "evidence_snippet": item["detail"],
             "detection_rule_id": rule,
             "detection_confidence": "Medium" if item["quantum_status"] == "inconclusive" else "High",
             "tls_quantum_status": item["quantum_status"],
@@ -139,9 +149,7 @@ class ScanService:
         elif quantum_status == "inconclusive":
             finding["quantum_classification"] = "Unknown / Needs Review"
             finding["classification_reason"] = item["detail"]
-        severity = item.get("severity", "Medium")
-        finding.update({"severity_category": severity,
-                        "severity_score": {"Critical": 90, "High": 75, "Medium": 50, "Low": 20}.get(severity, 50)})
+        finding.update(self.severity.score(finding, business_context or {}))
         finding["migration_recommendation"] = self.advisor.recommend(finding)
         return finding
 
@@ -160,13 +168,17 @@ class ScanService:
 
     def generate_cbom(self, scan_id):
         scan = database.get_scan(scan_id)
-        findings = database.get_findings(scan_id)
+        findings = self.current_findings(scan_id, scan=scan)
         cbom = self.cbom_gen.generate(scan, findings)
         d = get_settings().scan_temp_directory / scan_id / "exports"
         d.mkdir(parents=True, exist_ok=True)
         p = d / "cbom.json"
         p.write_text(json.dumps(cbom, indent=2), encoding="utf-8")
         return {"cbom": cbom, "validation": self.cbom_val.validate(cbom), "path": p}
+
+    def current_findings(self, scan_id, scan=None):
+        scan = scan if scan is not None else database.get_scan(scan_id)
+        return refresh_tls_findings(scan, database.get_findings(scan_id))
 
     def generate_pdf(self, scan_id):
         scan = database.get_scan(scan_id)
@@ -183,11 +195,18 @@ class ScanService:
         return p
 
     def export_findings_csv(self, scan_id):
-        p = get_settings().scan_temp_directory / scan_id / "exports" / "findings.csv"
-        return p.read_bytes() if p.exists() else b""
+        findings = self.current_findings(scan_id)
+        output = io.StringIO(newline="")
+        fields = ["finding_id", "scan_id", "language", "file_path", "start_line",
+                  "algorithm", "crypto_operation", "library_name", "quantum_classification",
+                  "severity_score", "severity_category", "detection_confidence", "migration_recommendation"]
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(findings)
+        return output.getvalue().encode("utf-8")
 
     def export_findings_json(self, scan_id):
-        p = get_settings().scan_temp_directory / scan_id / "exports" / "findings.json"
-        return p.read_bytes() if p.exists() else b"{}"
+        findings = self.current_findings(scan_id)
+        return json.dumps(findings, indent=2, default=str).encode("utf-8")
 
 scan_service = ScanService()
